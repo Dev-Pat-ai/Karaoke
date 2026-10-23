@@ -1,0 +1,240 @@
+'use client';
+
+import { useState, useCallback, useEffect } from 'react';
+import Link from 'next/link';
+import { motion } from 'framer-motion';
+import YouTubePlayer from '@/components/YouTubePlayer';
+import YouTubeSearch from '@/components/YouTubeSearch';
+import Queue from '@/components/Queue';
+import { QueueItem, YouTubeVideo } from '@/types/youtube';
+import { Music, Settings, Users, Hash } from 'lucide-react';
+import QuotaDisplay from '@/components/QuotaDisplay';
+import CreateRoomDialog from '@/components/CreateRoomDialog';
+import JoinRoomDialog from '@/components/JoinRoomDialog';
+import { isDemoMode, roomConfigurationIssue, hasYouTubeApiKey } from '@/lib/config';
+
+const STORAGE_KEY = 'karaoke-state';
+
+/**
+ * Main Karaoke App Page
+ * Manages the queue, current playing video, and search functionality
+ */
+export default function Home() {
+  const [queue, setQueue] = useState<QueueItem[]>([]);
+  const [currentVideoId, setCurrentVideoId] = useState<string | null>(null);
+  const [currentQueueId, setCurrentQueueId] = useState<string | null>(null);
+  const [isHydrated, setIsHydrated] = useState(false);
+  const [showCreateRoom, setShowCreateRoom] = useState(false);
+  const [showJoinRoom, setShowJoinRoom] = useState(false);
+
+  // Load state from localStorage on mount
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+    try {
+      const savedState = localStorage.getItem(STORAGE_KEY);
+      if (savedState) {
+        const { queue: savedQueue, currentVideoId: savedVideoId, currentQueueId: savedQueueId } = JSON.parse(savedState);
+        const restored: QueueItem[] = Array.isArray(savedQueue) ? savedQueue.filter((item): item is QueueItem =>
+          item && ['id', 'title', 'channelName', 'thumbnail', 'duration', 'queueId'].every(key => typeof item[key] === 'string') && /^[a-zA-Z0-9_-]{11}$/.test(item.id)
+        ) : [];
+        const current = restored.find(item => item.queueId === savedQueueId && item.id === savedVideoId);
+        setQueue(restored);
+        setCurrentVideoId(current?.id ?? null);
+        setCurrentQueueId(current?.queueId ?? null);
+      }
+    } catch (error) {
+      console.error('Failed to load saved state:', error);
+    }
+    setIsHydrated(true);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, []);
+
+  // Save state to localStorage whenever it changes
+  useEffect(() => {
+    if (!isHydrated) return; // Don't save during initial hydration
+    
+    try {
+      const state = {
+        queue,
+        currentVideoId,
+        currentQueueId,
+      };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    } catch (error) {
+      console.error('Failed to save state:', error);
+    }
+  }, [queue, currentVideoId, currentQueueId, isHydrated]);
+
+  /**
+   * Add a video to the queue
+   */
+  const handleAddToQueue = useCallback((video: YouTubeVideo) => {
+    const queueItem: QueueItem = {
+      ...video,
+      queueId: globalThis.crypto?.randomUUID?.() ?? `${video.id}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    };
+
+    setQueue((prev) => {
+      // Only auto-play if queue is empty and no video is playing
+      if (prev.length === 0 && !currentVideoId) {
+        setCurrentVideoId(queueItem.id);
+        setCurrentQueueId(queueItem.queueId);
+      }
+      return [...prev, queueItem];
+    });
+  }, [currentVideoId]);
+
+  /**
+   * Play a specific song from the queue
+   */
+  const handlePlaySong = useCallback((queueId: string) => {
+    const song = queue.find((item) => item.queueId === queueId);
+    if (song) {
+      setCurrentVideoId(song.id);
+      setCurrentQueueId(queueId);
+    }
+  }, [queue]);
+
+  /**
+   * Handle video end - automatically play next song
+   */
+  const handleVideoEnd = useCallback(() => {
+    // Remove the finished song from queue
+    const currentIndex = queue.findIndex((item) => item.queueId === currentQueueId);
+    
+    if (currentIndex !== -1) {
+      // Remove current song
+      const updatedQueue = queue.filter((item) => item.queueId !== currentQueueId);
+      setQueue(updatedQueue);
+
+      // Play next song if available
+      if (updatedQueue.length > 0) {
+        const nextSong = updatedQueue[0]; // Always play first in queue
+        setCurrentVideoId(nextSong.id);
+        setCurrentQueueId(nextSong.queueId);
+      } else {
+        // Queue is empty
+        setCurrentVideoId(null);
+        setCurrentQueueId(null);
+      }
+    }
+  }, [queue, currentQueueId]);
+
+  const handleRemoveSong = useCallback((queueId: string) => {
+    if (currentQueueId === queueId) handleVideoEnd();
+    else setQueue((prev) => prev.filter((item) => item.queueId !== queueId));
+  }, [currentQueueId, handleVideoEnd]);
+
+  return (
+    <div className="h-screen flex flex-col bg-background overflow-hidden">
+      {/* Header */}
+      <motion.header 
+        className="glass border-b border-border/50 shrink-0"
+        initial={{ opacity: 0, y: -10 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.3 }}
+      >
+        <div className="max-w-7xl mx-auto px-2 sm:px-4 md:px-6 py-2 sm:py-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-1.5 sm:gap-2">
+              <div className="w-6 h-6 sm:w-8 sm:h-8 rounded-lg bg-primary/20 flex items-center justify-center">
+                <Music className="h-4 w-4 sm:h-5 sm:w-5 text-primary" />
+              </div>
+              <h1 className="text-base sm:text-lg font-bold text-foreground font-mono">
+                KaraOkz
+              </h1>
+            </div>
+            <div className="flex items-center gap-1.5 sm:gap-2">
+              <Link href="/" className="text-[10px] sm:text-xs text-primary font-mono mr-2">Local videoke</Link>
+              <QuotaDisplay />
+              <button
+                aria-label="Join room"
+                onClick={() => setShowJoinRoom(true)}
+                className="flex items-center gap-1 px-2 py-1.5 rounded-lg bg-muted border border-border/50 text-muted-foreground hover:text-foreground hover:bg-muted/80 transition-colors font-mono text-[10px] sm:text-xs"
+              >
+                <Hash className="h-3 w-3 sm:h-3.5 sm:w-3.5" />
+                <span className="hidden sm:inline">Join</span>
+              </button>
+              <button
+                aria-label="Create room"
+                onClick={() => setShowCreateRoom(true)}
+                className="flex items-center gap-1 px-2 py-1.5 rounded-lg bg-primary/10 border border-primary/20 text-primary hover:bg-primary/20 transition-colors font-mono text-[10px] sm:text-xs"
+              >
+                <Users className="h-3 w-3 sm:h-3.5 sm:w-3.5" />
+                <span className="hidden sm:inline">Room</span>
+              </button>
+              <button className="w-6 h-6 sm:w-8 sm:h-8 rounded-lg bg-muted flex items-center justify-center text-muted-foreground hover:text-foreground transition-colors">
+                <Settings className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
+              </button>
+            </div>
+          </div>
+        </div>
+      </motion.header>
+
+      {(isDemoMode || !hasYouTubeApiKey) && (
+        <div role="status" className="shrink-0 border-b border-border/50 px-3 py-2 text-xs text-muted-foreground">
+          {isDemoMode && <p><strong>Local demo mode.</strong> Queue changes stay in this browser. {roomConfigurationIssue}</p>}
+          {!hasYouTubeApiKey && <p>YouTube search needs an API key. Use the URL tab to test the local queue and online playback.</p>}
+        </div>
+      )}
+
+      {/* Main Content */}
+      <main className="flex-1 min-h-0 overflow-y-auto lg:overflow-hidden p-2 sm:p-4 md:p-6">
+        <div className="max-w-7xl mx-auto h-full">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2 sm:gap-4 lg:h-full">
+            {/* Left Panel: Player (2 columns on desktop) */}
+            <motion.div 
+              className="md:col-span-2 lg:col-span-2 h-64 sm:h-72 md:h-80 lg:h-full"
+              initial={{ opacity: 0, x: -10 }}
+              animate={{ opacity: 1, x: 0 }}
+              transition={{ duration: 0.3, delay: 0.1 }}
+            >
+              <YouTubePlayer videoId={currentVideoId} playbackKey={currentQueueId} onVideoEnd={handleVideoEnd} />
+            </motion.div>
+
+            {/* Right Panel: Search + Queue (1 column on desktop) */}
+            <motion.div 
+              className="md:col-span-2 lg:col-span-1 h-auto lg:h-full flex flex-col gap-2 sm:gap-4 overflow-hidden"
+              initial={{ opacity: 0, x: 10 }}
+              animate={{ opacity: 1, x: 0 }}
+              transition={{ duration: 0.3, delay: 0.2 }}
+            >
+              {/* Search */}
+              <YouTubeSearch onAddToQueue={handleAddToQueue} />
+
+              {/* Queue */}
+              <div className="flex-1 min-h-40 sm:min-h-48 lg:min-h-0 overflow-hidden">
+                <Queue
+                  queue={queue}
+                  currentQueueId={currentQueueId}
+                  onPlaySong={handlePlaySong}
+                  onRemoveSong={handleRemoveSong}
+                />
+              </div>
+            </motion.div>
+          </div>
+          
+        </div>
+      </main>
+
+      {/* Footer */}
+      <motion.footer 
+        className="glass border-t border-border/50 shrink-0"
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ duration: 0.3, delay: 0.3 }}
+      >
+        <div className="max-w-7xl mx-auto px-2 sm:px-4 md:px-6 py-2 sm:py-3">
+          <p className="text-center text-[10px] sm:text-xs text-muted-foreground font-mono">
+            © {new Date().getFullYear()} Zio Magugat · Built with intention
+          </p>
+        </div>
+      </motion.footer>
+
+      {/* Dialogs — rendered outside any transformed element to avoid stacking context issues */}
+      {showCreateRoom && <CreateRoomDialog onClose={() => setShowCreateRoom(false)} />}
+      {showJoinRoom && <JoinRoomDialog onClose={() => setShowJoinRoom(false)} />}
+    </div>
+  );
+}
